@@ -125,6 +125,34 @@ SYSTEM_PROMPT = """You are Aethr, a helpful personal AI assistant. You are conci
 friendly, and adapt to the user's communication style over time. You remember context \
 from the current conversation. When uncertain, say so rather than guessing."""
 
+# ── Reward Plugins ────────────────────────────────────────────────────────────
+#
+# This is the single place to control which reward functions run and at what weight.
+# Import order doesn't matter — the registry handles deduplication.
+#
+# To add a custom plugin:
+#   1. Create rewards/plugins/your_plugin.py with a class extending RewardPlugin
+#   2. Call register(YourPlugin()) at the bottom of that file
+#   3. Add "your_plugin_name" to ACTIVE_PLUGIN_NAMES below
+#
+# To disable a plugin without deleting it: remove its name from this list.
+# To change a plugin's weight: set plugin.weight in its class definition.
+
+ACTIVE_PLUGIN_NAMES: list[str] = [
+    "rule_based",           # rewards/plugins/general.py — instant, free
+    "medical_guardrails",   # rewards/plugins/medical.py — Vithos guardrails
+    "llm_judge",            # rewards/plugins/general.py — async, ~$0.002/call
+]
+
+# Loaded lazily on first use by the reward worker
+def get_active_plugins():
+    """Import and return the configured reward plugin instances."""
+    import rewards.plugins.general   # noqa: F401 — registers rule_based + llm_judge
+    import rewards.plugins.medical   # noqa: F401 — registers medical_guardrails
+    from rewards.registry import get_plugin
+    return [get_plugin(name) for name in ACTIVE_PLUGIN_NAMES]
+
+
 # ── wandb ─────────────────────────────────────────────────────────────────────
 
 WANDB_PROJECT: str = os.getenv("WANDB_PROJECT", "aethr")
