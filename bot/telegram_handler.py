@@ -22,6 +22,7 @@ from config import TELEGRAM_TOKEN, ADMIN_USER_ID, SYSTEM_PROMPT
 from inference.client import llm
 from bot.conversation_manager import build_context
 from bot.feedback_collector import classify_user_message, feedback_to_score
+from bot.safety import safe_generate
 from db.queries import (
     create_conversation,
     save_message,
@@ -98,11 +99,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
-    # ── Generate ──────────────────────────────────────────────────────────────
-    full_response = ""
+    # ── Generate (with safety filter + retry) ────────────────────────────────
     try:
-        async for chunk in llm.chat_stream(messages):
-            full_response += chunk
+        async def _generate(msgs):
+            out = ""
+            async for chunk in llm.chat_stream(msgs):
+                out += chunk
+            return out
+
+        full_response = await safe_generate(_generate, messages, SYSTEM_PROMPT)
     except Exception as e:
         logger.error(f"Generation failed: {e}")
         await update.message.reply_text(
