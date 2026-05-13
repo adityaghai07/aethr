@@ -1,8 +1,10 @@
 # Aethr
 
-A self-improving AI assistant that learns from every conversation using online reinforcement learning (GRPO). Built for [Vithos](https://vithos.app) — a medical lab-data companion that observes and contextualizes, never diagnoses.
+A framework for building self-improving AI assistants that learn from every conversation using online reinforcement learning (GRPO). No static datasets — the model scores its own responses and trains on the live conversation stream.
 
-## Architecture
+> Built as the backbone for [Vithos](https://vithos.in), but designed to be domain-agnostic. Swap in your own reward plugins and system prompt for any use case.
+
+## How it works
 
 ```
 User (Telegram)
@@ -11,15 +13,15 @@ User (Telegram)
 Bot + Safety Filter (local machine)
     │  OpenAI-compatible API
     ▼
-Kaggle Inference Notebook A (ngrok tunnel)
-    └─ Unsloth + vLLM + Qwen3-8B + active LoRA adapter
+Inference Notebook (Colab / Kaggle, ngrok tunnel)
+    └─ Unsloth + Qwen3-8B-4bit + active LoRA adapter
 
-    [async, after response sent]
+    [async, after response is sent]
     ▼
 Reward Worker (local machine)
-    ├─ RuleBasedPlugin        — instant, free
-    ├─ MedicalGuardrailPlugin — Vithos guardrails
-    └─ LLMJudgePlugin         — Claude Sonnet judge, ~$0.002/call
+    ├─ RuleBasedPlugin   — instant, free
+    ├─ YourCustomPlugin  — add any domain-specific signals
+    └─ LLMJudgePlugin    — Claude/GPT judge, ~$0.002/call
     │
     ▼
 Supabase (PostgreSQL)
@@ -27,97 +29,101 @@ Supabase (PostgreSQL)
 
     [when buffer hits 64 scored examples]
     ▼
-Kaggle Training Notebook B
+Training Notebook (Colab / Kaggle)
     └─ GRPO → new LoRA adapter → pushed to HF Hub
     ▼
-Inference Notebook A loads new adapter on next restart
-    └─ Loop repeats — model improves with every conversation
+Inference Notebook loads new adapter → loop repeats
 ```
 
 ## Quick Start
 
-### 1. Setup
+### 1. Clone and install
 
 ```bash
-git clone https://github.com/your-username/aethr
+git clone https://github.com/adityaghai07/aethr
 cd aethr
 pip install -r requirements.txt
-
 cp .env.example .env
 # Fill in: TELEGRAM_TOKEN, DATABASE_URL, HF_TOKEN, HF_ADAPTER_REPO, JUDGE_API_KEY
 ```
 
-### 2. Database (Supabase)
+### 2. Database (Supabase — free tier)
 
-1. Create a free project at [supabase.com](https://supabase.com)
+1. Create a project at [supabase.com](https://supabase.com)
 2. SQL Editor → run `db/migrations/001_initial.sql`
 3. Paste the connection string into `DATABASE_URL` in `.env`
 
-### 3. Inference (Kaggle Notebook A)
+### 3. HuggingFace Hub (adapter storage)
 
-1. Open `notebooks/kaggle_inference.py` as a new Kaggle notebook (GPU accelerator on)
-2. Add secrets as Kaggle secrets: `HF_TOKEN`, `NGROK_AUTH_TOKEN`, `HF_ADAPTER_REPO`
-3. Run all cells — copy the ngrok URL it prints
+Create a private model repo at [huggingface.co/new](https://huggingface.co/new) — e.g. `your-username/aethr-adapters`. Set `HF_ADAPTER_REPO` in `.env`.
 
-### 4. Bot + Reward Worker
+### 4. Inference notebook
+
+Open `notebooks/kaggle_inference.py` in Colab or Kaggle (T4 GPU). Fill in Cell 2 with your tokens. Run all cells — Cell 6 prints the ngrok URL.
+
+### 5. Bot + Reward Worker
 
 ```bash
-# Terminal 1 — Telegram bot
+# Terminal 1
 python -m bot.telegram_handler
 
-# Terminal 2 — background reward scorer
+# Terminal 2
 python -m rewards.worker
 ```
 
-Send `/seturl <ngrok-url>` to your bot, then `/health` to verify the connection.
+Send `/seturl <ngrok-url>` to your bot, then `/health` to confirm it's connected.
 
 ## Reward Plugins
 
-Configured in `config.py → ACTIVE_PLUGIN_NAMES`. Currently active:
+The reward stack is fully pluggable. Configure it in `config.py → ACTIVE_PLUGIN_NAMES`.
 
-| Plugin | Weight | Purpose |
+| Plugin | Weight | What it rewards |
 |---|---|---|
-| `rule_based` | 0.25 | Length, format, language — instant, free |
-| `medical_guardrails` | 0.40 | Vithos guardrails — penalizes diagnosis/alarm/treatment language |
-| `llm_judge` | 0.50 | Claude Sonnet rubric scoring — most informative |
+| `rule_based` | 0.25 | Length appropriateness, format, language match — instant, free |
+| `llm_judge` | 0.50 | 5-dimension rubric scoring via external LLM — most informative signal |
+| `medical_guardrails` | 0.40 | Example domain plugin — ships with the repo (see below) |
 
-**To add a custom plugin:** extend `RewardPlugin` in `rewards/plugins/`, implement `score()`, call `register()`, add name to `ACTIVE_PLUGIN_NAMES` in `config.py`. See `rewards/plugins/example_coding.py` for a template.
+**Adding your own plugin:**
+1. Create `rewards/plugins/your_plugin.py`, extend `RewardPlugin`, implement `score()`
+2. Call `register(YourPlugin())` at the bottom
+3. Add the name to `ACTIVE_PLUGIN_NAMES` in `config.py`
 
-### Medical Guardrails (`rewards/plugins/medical.py`)
+See `rewards/plugins/example_coding.py` for a minimal template.
 
-| Signal | Reward | Action |
+### Bundled domain plugin: Medical Guardrails
+
+`rewards/plugins/medical.py` ships as an example of a domain-specific plugin. It enforces a "observe and contextualize, never diagnose" contract:
+
+| Signal | Reward | Effect |
 |---|---|---|
-| Diagnosis language | −1.0 + `violated=True` | Hard-blocked, response regenerated |
-| Treatment recommendation | −1.0 + `violated=True` | Hard-blocked |
+| Diagnosis / treatment language | −1.0 + `violated=True` | Response hard-blocked, regenerated |
 | Alarming language | −0.6 + `violated=True` | Hard-blocked |
-| Legalistic AI disclaimer | −0.4 | Penalized (shapes training) |
-| Human disclaimer | +0.2 | Rewarded |
-| Calm contextualizing language | +0.3 | Rewarded |
+| Legalistic AI boilerplate | −0.4 | Penalized in training |
+| Human-sounding disclaimer | +0.2 | Rewarded |
+| Calm, contextualizing language | +0.3 | Rewarded |
 | Doctor redirect on clinical query | +0.2 | Rewarded |
 
-Hard violations (`violated=True`) are caught by `bot/safety.py` before the message reaches the user. The bot retries with a stricter system prompt; after 2 failed retries it sends a safe fallback message.
+Hard violations are caught by `bot/safety.py` before delivery. The bot retries with a stricter prompt; after 2 failed retries it sends a safe fallback. Remove this plugin from `ACTIVE_PLUGIN_NAMES` if your use case doesn't need it.
 
 ## Build Phases
 
 | Phase | What | Status |
 |---|---|---|
-| 0 | Kaggle inference server (Notebook A) | ✓ |
+| 0 | Inference notebook (Colab/Kaggle) | ✓ |
 | 1 | Inference client + health checks | ✓ |
 | 2 | Telegram bot + Supabase logging | ✓ |
-| 3 | Reward system (all plugins) | ✓ |
-| 4 | Offline GRPO training (Notebook B) | ✓ |
+| 3 | Reward plugin system | ✓ |
+| 4 | Offline GRPO training notebook | ✓ |
 | 5 | Online RL loop (buffer → train → eval-gate) | — |
 | 6 | Anti-forgetting + eval suite | — |
 | 7 | Gradio dashboard + wandb | — |
 
-## Guardrails (Vithos)
+## Stack
 
-The AI observes and contextualizes. It never diagnoses, prescribes, or recommends stopping/starting treatment.
-
-✓ *"Your LDL is 142 mg/dL — above the 130 threshold and rising across your last 3 tests. Worth mentioning at your next checkup."*
-
-✗ *"DANGER: Your LDL is critically elevated."*
-✗ *"You have hyperlipidemia."*
-✗ *"You should start a statin."*
-
-Disclaimer sounds human: *"These are observations from your data, not a diagnosis. Your doctor has the final word."*
+- **Model:** Qwen3-8B (4-bit via Unsloth) — swap for any HF model
+- **Training:** TRL GRPOTrainer + Unsloth
+- **Inference:** HuggingFace generate (Colab T4 compatible)
+- **Database:** Supabase (PostgreSQL)
+- **Adapter storage:** HuggingFace Hub (versioned, rollback by commit hash)
+- **Observability:** wandb
+- **Bot:** python-telegram-bot v21
