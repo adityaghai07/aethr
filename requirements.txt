@@ -1,0 +1,45 @@
+# ── Core ML ───────────────────────────────────────────────────────────────────
+torch>=2.4.0
+transformers>=4.51.0
+accelerate>=1.6.0
+peft>=0.15.0
+bitsandbytes>=0.45.0
+trl>=0.17.0
+datasets>=3.5.0
+
+# Unsloth: 2x training speed, 70% less VRAM
+# Install separately per platform — see https://github.com/unslothai/unsloth
+# pip install unsloth  (on GPU machine / Kaggle)
+
+# ── Inference ─────────────────────────────────────────────────────────────────
+# vLLM is installed on the Kaggle notebook, not local
+# vllm>=0.8.0
+
+# ── Telegram Bot ──────────────────────────────────────────────────────────────
+python-telegram-bot[job-queue]>=21.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+asyncpg>=0.30.0
+sqlalchemy[asyncio]>=2.0.0
+alembic>=1.15.0
+
+# ── HTTP ──────────────────────────────────────────────────────────────────────
+httpx>=0.28.0
+aiohttp>=3.11.0
+
+# ── HuggingFace Hub (adapter push/pull) ───────────────────────────────────────
+huggingface_hub>=0.30.0
+
+# ── Observability ─────────────────────────────────────────────────────────────
+wandb>=0.19.0
+gradio>=5.0.0
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+lm-eval>=0.4.0
+
+# ── Tokenization (approximate token counting for context window) ───────────────
+tiktoken>=0.9.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.1.0
+pydantic>=2.11.0
