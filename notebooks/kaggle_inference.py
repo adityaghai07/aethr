@@ -1,16 +1,10 @@
-# Aethr — Kaggle Inference Notebook (Notebook A)
-# Run this in a Kaggle notebook with GPU accelerator enabled.
-# RTX PRO 6000 (96GB) recommended. T4 x2 also works with 4-bit model.
+# Aethr — Inference Notebook (Colab / Kaggle T4)
 #
-# This notebook:
-#   1. Installs dependencies
-#   2. Loads Qwen3-8B via Unsloth (4-bit quantized — fits any Kaggle GPU)
-#   3. Starts a FastAPI server (OpenAI-compatible /v1/chat/completions)
-#   4. Exposes it via ngrok — copy the printed URL into your bot's /seturl command
-#   5. Loads the latest LoRA adapter from HF Hub (if one exists)
+# Works on: Colab T4 (15GB), Kaggle T4 x2, Kaggle P100 (16GB)
+# GPU budget: 4-bit Qwen3-8B ≈ 8GB loaded, ~6GB left for KV cache + generation
 #
-# Sessions last up to 12 hours. When the session ends, restart and run all cells again.
-# The bot handles the URL rotation via /seturl.
+# IMPORTANT: Runtime → Restart runtime before running if you hit OOM.
+# Each cell is independent — restart clears all GPU memory.
 
 # ── Cell 1: Install ────────────────────────────────────────────────────────────
 # In[ ]:
@@ -19,12 +13,14 @@ import subprocess
 subprocess.run([
     "pip", "install", "-q",
     "unsloth",
-    "vllm",
     "fastapi",
     "uvicorn[standard]",
     "pyngrok",
     "huggingface_hub",
-    "python-dotenv",
+    "transformers",
+    "accelerate",
+    "bitsandbytes",
+    "httpx",
 ], check=True)
 print("✓ Packages installed")
 
@@ -33,56 +29,58 @@ print("✓ Packages installed")
 
 import os
 
-# Paste your secrets here OR add them as Kaggle secrets (recommended)
-HF_TOKEN         = os.environ.get("HF_TOKEN", "hf_YOUR_TOKEN_HERE")
-HF_ADAPTER_REPO  = os.environ.get("HF_ADAPTER_REPO", "your-hf-username/aethr-adapters")
-NGROK_AUTH_TOKEN = os.environ.get("NGROK_AUTH_TOKEN", "your-ngrok-token")
-BASE_MODEL       = "unsloth/Qwen3-8B-bnb-4bit"   # 4-bit: ~8GB VRAM, works on any Kaggle GPU
+HF_TOKEN         = os.environ.get("HF_TOKEN",         "YOUR_HF_TOKEN")
+HF_ADAPTER_REPO  = os.environ.get("HF_ADAPTER_REPO",  "your-hf-username/aethr-adapters")
+NGROK_AUTH_TOKEN = os.environ.get("NGROK_AUTH_TOKEN",  "YOUR_NGROK_TOKEN")
+BASE_MODEL       = "unsloth/Qwen3-8B-bnb-4bit"
 
 os.environ["HF_TOKEN"] = HF_TOKEN
+print(f"✓ Config loaded — model: {BASE_MODEL}")
 
 # ── Cell 3: Load model ────────────────────────────────────────────────────────
 # In[ ]:
-# What's happening here:
-#   - Unsloth loads the model in 4-bit (bnb) — cuts VRAM from 16GB to ~8GB
-#   - fast_inference=True enables the vLLM backend for throughput
-#   - get_peft_model attaches LoRA adapter slots — needed for training hot-swap later
-#   - gpu_memory_utilization=0.6 leaves headroom; raise to 0.8 if not training on this GPU
+# NO vLLM (fast_inference=False) — T4 has 15GB; after 4-bit model loads (~8GB)
+# there is not enough headroom for vLLM's KV cache pre-allocation.
+# Plain HuggingFace generate() is sufficient for single-user Telegram load.
+# NO standby mode — that's only needed when training and inferring on the same GPU.
 
-import os
-os.environ["UNSLOTH_VLLM_STANDBY"] = "1"   # share weights between vLLM and training
-
-from unsloth import FastLanguageModel
 import torch
+from unsloth import FastLanguageModel
+
+# Clear any leftover GPU memory from previous runs
+torch.cuda.empty_cache()
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
-    max_seq_length=8192,
+    max_seq_length=4096,
     load_in_4bit=True,
-    fast_inference=True,        # enables vLLM backend
-    gpu_memory_utilization=0.6,
+    fast_inference=False,   # vLLM disabled — not enough VRAM on T4
 )
 
+# Attach LoRA slots so we can hot-swap adapters later (Phase 4+)
 model = FastLanguageModel.get_peft_model(
     model,
     r=32,
     lora_alpha=64,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    use_gradient_checkpointing="unsloth",
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    use_gradient_checkpointing=False,  # inference only — no need for this
 )
+FastLanguageModel.for_inference(model)  # puts model in fast eval mode
 
 print(f"✓ Model loaded: {BASE_MODEL}")
-print(f"  GPU memory: {torch.cuda.memory_allocated()/1e9:.1f} GB allocated")
+print(f"  GPU memory used: {torch.cuda.memory_allocated()/1e9:.1f} GB / "
+      f"{torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB")
 
-# ── Cell 4: Load latest adapter from HF Hub (if available) ───────────────────
+# ── Cell 4: Load latest LoRA adapter from HF Hub (optional) ──────────────────
 # In[ ]:
-# On first run there won't be an adapter — that's fine, model runs on base weights.
-# After Phase 4 training, this will load the latest improved adapter automatically.
+# First run: no adapter exists yet — runs on base weights, that's fine.
+# After Phase 4 training: adapter is pulled and loaded automatically.
 
-from huggingface_hub import snapshot_download, list_repo_commits
-from peft import PeftModel
+from huggingface_hub import list_repo_commits, snapshot_download
 
-ADAPTER_DIR = "/kaggle/working/active_adapter"
+ADAPTER_DIR = "/content/active_adapter"
+ACTIVE_ADAPTER = "base"
 
 try:
     commits = list(list_repo_commits(HF_ADAPTER_REPO, repo_type="model", token=HF_TOKEN))
@@ -93,161 +91,146 @@ try:
             token=HF_TOKEN,
             repo_type="model",
         )
+        from peft import PeftModel
         model = PeftModel.from_pretrained(model, ADAPTER_DIR)
-        print(f"✓ Loaded adapter from {HF_ADAPTER_REPO} (commit: {commits[0].commit_id[:8]})")
+        ACTIVE_ADAPTER = commits[0].commit_id[:8]
+        print(f"✓ Adapter loaded from {HF_ADAPTER_REPO} @ {ACTIVE_ADAPTER}")
     else:
-        print("ℹ No adapter found — running on base model weights")
+        print("ℹ No adapter in HF Hub yet — running on base weights")
 except Exception as e:
-    print(f"ℹ Adapter load skipped: {e}")
-    print("  Running on base model weights")
+    print(f"ℹ Adapter load skipped ({e}) — running on base weights")
 
-# ── Cell 5: FastAPI server ────────────────────────────────────────────────────
+# ── Cell 5: FastAPI inference server ─────────────────────────────────────────
 # In[ ]:
-# OpenAI-compatible API so your local bot code stays unchanged.
-# The /health endpoint prevents Kaggle's 20-min idle timeout when pinged regularly.
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
-import uvicorn
-import threading
 import json
+import threading
 import asyncio
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from transformers import TextIteratorStreamer
+import uvicorn
 
 app = FastAPI(title="Aethr Inference Server")
-
-ACTIVE_ADAPTER_REVISION = commits[0].commit_id[:8] if 'commits' in dir() and commits else "base"
 
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "model": BASE_MODEL,
-        "adapter": ACTIVE_ADAPTER_REVISION,
-    }
+    return {"status": "ok", "model": BASE_MODEL, "adapter": ACTIVE_ADAPTER}
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await request.json()
-    messages  = body.get("messages", [])
-    max_tokens = body.get("max_tokens", 2048)
+    body        = await request.json()
+    messages    = body.get("messages", [])
+    max_tokens  = body.get("max_tokens", 512)
     temperature = body.get("temperature", 0.7)
-    stream = body.get("stream", False)
+    do_stream   = body.get("stream", False)
 
-    # Apply Qwen3 chat template
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
+    inputs = tokenizer(text, return_tensors="pt").to("cuda")
 
-    if stream:
-        async def _stream_tokens():
-            inputs = tokenizer(text, return_tensors="pt").to("cuda")
-            # vLLM streaming — yields tokens as they're generated
-            for token_id in model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                do_sample=temperature > 0,
-                streamer=None,     # TODO: add TextIteratorStreamer for true streaming
-            )[0][inputs["input_ids"].shape[1]:]:
-                token = tokenizer.decode([token_id], skip_special_tokens=True)
+    gen_kwargs = dict(
+        **inputs,
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        do_sample=temperature > 0,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+
+    if do_stream:
+        streamer = TextIteratorStreamer(
+            tokenizer, skip_prompt=True, skip_special_tokens=True
+        )
+        gen_kwargs["streamer"] = streamer
+
+        # Run generation in a background thread so we can stream tokens
+        thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
+        thread.start()
+
+        async def _token_stream():
+            for token in streamer:
                 chunk = {"choices": [{"delta": {"content": token}, "finish_reason": None}]}
                 yield f"data: {json.dumps(chunk)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(_stream_tokens(), media_type="text/event-stream")
+        return StreamingResponse(_token_stream(), media_type="text/event-stream")
 
     # Non-streaming
-    inputs = tokenizer(text, return_tensors="pt").to("cuda")
     with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            do_sample=temperature > 0,
-        )
+        output = model.generate(**gen_kwargs)
     response_text = tokenizer.decode(
         output[0][inputs["input_ids"].shape[1]:],
         skip_special_tokens=True,
     )
-
     return {
         "id": "aethr-1",
         "object": "chat.completion",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": response_text},
-            "finish_reason": "stop",
-        }],
+        "choices": [{"index": 0,
+                     "message": {"role": "assistant", "content": response_text},
+                     "finish_reason": "stop"}],
         "model": BASE_MODEL,
     }
 
 
-# Run server in background thread (non-blocking so notebook cells can continue)
 def _run_server():
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
 
-server_thread = threading.Thread(target=_run_server, daemon=True)
-server_thread.start()
+threading.Thread(target=_run_server, daemon=True).start()
 
-import time; time.sleep(2)   # wait for server to start
+import time; time.sleep(2)
 print("✓ Server running on port 8000")
 
 # ── Cell 6: Expose via ngrok ──────────────────────────────────────────────────
 # In[ ]:
-# ngrok creates a public HTTPS tunnel to port 8000.
-# The URL changes every session — copy it and send /seturl <url> to your bot.
 
 from pyngrok import ngrok, conf
 
 conf.get_default().auth_token = NGROK_AUTH_TOKEN
+ngrok.kill()  # kill any leftover tunnels from previous runs
 tunnel = ngrok.connect(8000, "http")
 public_url = tunnel.public_url
 
 print("=" * 60)
 print(f"  PUBLIC URL: {public_url}")
 print("=" * 60)
-print(f"\nSend this to your bot:\n  /seturl {public_url}")
-print("\nKeep this notebook running. Session lasts up to 12 hours.")
-print("Ping /health to prevent 20-min idle timeout.")
+print(f"\nSend to your bot:  /seturl {public_url}")
 
-# ── Cell 7: Health check ──────────────────────────────────────────────────────
+# ── Cell 7: Verify ────────────────────────────────────────────────────────────
 # In[ ]:
-# Run this to verify everything is working before connecting the bot.
 
-import httpx
+import httpx, time
 
-resp = httpx.get(f"{public_url}/health")
+resp = httpx.get(f"{public_url}/health", timeout=10)
 print(f"Health: {resp.json()}")
 
-test_resp = httpx.post(
+test = httpx.post(
     f"{public_url}/v1/chat/completions",
     json={
         "messages": [
             {"role": "system", "content": "You are Aethr, a helpful assistant."},
-            {"role": "user", "content": "Say hello in one sentence."},
+            {"role": "user",   "content": "Say hello in one sentence."},
         ],
-        "max_tokens": 50,
+        "max_tokens": 60,
         "temperature": 0.7,
     },
-    timeout=60,
+    timeout=120,
 )
-print(f"\nTest response: {test_resp.json()['choices'][0]['message']['content']}")
-print("\n✓ Inference server is ready. Send /seturl to your bot.")
+print(f"\nTest response: {test.json()['choices'][0]['message']['content']}")
+print("\n✓ Ready. Send /seturl to your Telegram bot.")
 
-# ── Cell 8: Keep-alive (run in a separate cell, leave running) ────────────────
+# ── Cell 8: Keep-alive (leave this running) ───────────────────────────────────
 # In[ ]:
-# Prevents Kaggle's idle timeout from killing the session.
-# Run this cell and leave it — it pings /health every 10 minutes.
 
-import time
+import time, httpx
 while True:
     try:
         r = httpx.get(f"{public_url}/health", timeout=5)
         print(f"[keep-alive] {time.strftime('%H:%M:%S')} — {r.json()['status']}")
     except Exception as e:
         print(f"[keep-alive] ping failed: {e}")
-    time.sleep(600)   # 10 minutes
+    time.sleep(600)
