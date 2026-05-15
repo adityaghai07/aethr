@@ -9,25 +9,27 @@
 #
 # Run when ≥32 scored conversations are in Supabase.
 
-# ── Cell 1: Install (Unsloth's exact T4 recipe — version pins matter) ─────────
+# ── Cell 1: Install ───────────────────────────────────────────────────────────
 # In[ ]:
+# Let pip resolve full dependency trees — using --no-deps skips required
+# transitive packages like msgspec that vLLM needs at import time.
+# We only pin versions where Unsloth's T4 GRPO recipe specifically requires it.
 
 # %%capture   ← uncomment in Colab to silence noisy pip output
 import os
-if "COLAB_" not in "".join(os.environ.keys()):
-    # Local — just install latest
-    os.system("pip install unsloth vllm")
-else:
-    # Colab — use Unsloth's pinned versions to avoid the
-    # torch.compile / vLLM dynamo graph bug on T4.
-    os.system('pip install --no-deps bitsandbytes accelerate xformers==0.0.30 '
-              'peft "trl<0.23" triton cut_cross_entropy unsloth_zoo')
-    os.system('pip install sentencepiece protobuf "datasets>=3.4.1" '
-              'huggingface_hub hf_transfer')
-    os.system("pip install --no-deps unsloth")
-    os.system("pip install --no-deps vllm==0.10.2")
 
-# Aethr-specific extras
+if "COLAB_" not in "".join(os.environ.keys()):
+    os.system("pip install -q unsloth vllm")
+else:
+    # Core training stack
+    os.system("pip install -q unsloth")
+    os.system("pip install -q vllm==0.10.2")
+    # trl<0.23 is required — newer versions have GRPOTrainer API breakage
+    os.system('pip install -q --upgrade "trl<0.23"')
+    # Sometimes Colab's pillow is stale and breaks unsloth imports
+    os.system("pip install -q --upgrade pillow")
+
+# Aethr-specific deps
 os.system("pip install -q asyncpg sqlalchemy[asyncio] anthropic httpx python-dotenv wandb")
 
 print("✓ Packages installed")
