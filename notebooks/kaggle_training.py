@@ -192,8 +192,15 @@ print(f"Sanity check reward (should be > 0): {test[0]:.3f}")
 
 from trl import GRPOConfig, GRPOTrainer
 
+# T4 memory budget: 4-bit model ~6GB, LoRA grads + adam_8bit ~1.5GB, vLLM rollout
+# pool ~3GB → ~4.5GB left for activations. Group memory scales as
+#   num_generations × max_completion_length
+# So 4 × 384 = 1536 tokens per step is the safe ceiling. 8 × 768 = 6144 OOMs.
 max_prompt_length     = 256
-max_completion_length = max_seq_length - max_prompt_length   # 768
+max_completion_length = 384      # was 768 — caused IMA in swiglu kernel
+
+# Clear any fragmented memory before training
+torch.cuda.empty_cache()
 
 training_args = GRPOConfig(
     learning_rate               = 5e-6,
@@ -206,11 +213,11 @@ training_args = GRPOConfig(
     logging_steps               = 1,
     per_device_train_batch_size = 1,
     gradient_accumulation_steps = 1,
-    num_generations             = 8,
+    num_generations             = 4,         # was 8 — T4 can't hold 8 rollouts simultaneously
     max_prompt_length           = max_prompt_length,
     max_completion_length       = max_completion_length,
     num_train_epochs            = 1,
-    max_steps                   = 100,        # start with 100 — bump up after sanity check
+    max_steps                   = 100,
     save_steps                  = 100,
     max_grad_norm               = 0.1,
     report_to                   = "wandb",
