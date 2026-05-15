@@ -11,28 +11,32 @@
 
 # ── Cell 1: Install ───────────────────────────────────────────────────────────
 # In[ ]:
-# Let pip resolve full dependency trees — using --no-deps skips required
-# transitive packages like msgspec that vLLM needs at import time.
-# We only pin versions where Unsloth's T4 GRPO recipe specifically requires it.
+# IMPORTANT: VLLM_USE_V1 must be set BEFORE any vllm/unsloth import — vLLM picks
+# its engine version at import time and locks it. V0 is the stable backend; V1
+# has a known "Duplicate layer name: model.layers.0.self_attn.attn" bug with
+# bitsandbytes 4-bit models on T4.
 
-# %%capture   ← uncomment in Colab to silence noisy pip output
 import os
+os.environ["VLLM_USE_V1"] = "0"
+
+# torchcodec is pulled in transitively but needs FFmpeg system libs that
+# Colab's image lacks — uninstall it before unsloth tries to import it.
+os.system("pip uninstall -y -q torchcodec")
 
 if "COLAB_" not in "".join(os.environ.keys()):
     os.system("pip install -q unsloth vllm")
 else:
-    # Core training stack
+    # Core training stack — let pip resolve transitive deps (no --no-deps)
     os.system("pip install -q unsloth")
     os.system("pip install -q vllm==0.10.2")
     # trl<0.23 is required — newer versions have GRPOTrainer API breakage
     os.system('pip install -q --upgrade "trl<0.23"')
-    # Sometimes Colab's pillow is stale and breaks unsloth imports
     os.system("pip install -q --upgrade pillow")
 
 # Aethr-specific deps
 os.system("pip install -q asyncpg sqlalchemy[asyncio] anthropic httpx python-dotenv wandb")
 
-print("✓ Packages installed")
+print("✓ Packages installed, VLLM_USE_V1=0, torchcodec removed")
 
 # ── Cell 2: Clone aethr codebase ──────────────────────────────────────────────
 # In[ ]:
