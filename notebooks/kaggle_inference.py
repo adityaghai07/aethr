@@ -131,6 +131,7 @@ async def chat_completions(request: Request):
         messages,
         tokenize=False,
         add_generation_prompt=True,
+        enable_thinking=False,   # skip <think>...</think> — wastes tokens for our use case
     )
     inputs = tokenizer(text, return_tensors="pt").to("cuda")
 

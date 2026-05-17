@@ -140,7 +140,7 @@ from the current conversation. When uncertain, say so rather than guessing."""
 
 ACTIVE_PLUGIN_NAMES: list[str] = [
     "rule_based",           # rewards/plugins/general.py — instant, free
-    "medical_guardrails",   # rewards/plugins/medical.py — Vithos guardrails
+    # "medical_guardrails", # disabled for now — re-enable when bot is live
     "llm_judge",            # rewards/plugins/general.py — async, ~$0.002/call
 ]
 
