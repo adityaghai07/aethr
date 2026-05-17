@@ -7,7 +7,6 @@
 # Each cell is independent — restart clears all GPU memory.
 
 # ── Cell 1: Install ────────────────────────────────────────────────────────────
-# In[ ]:
 
 import subprocess
 subprocess.run([

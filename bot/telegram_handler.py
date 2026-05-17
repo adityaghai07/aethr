@@ -10,6 +10,7 @@ Commands:
   /health  — check inference server reachability
 """
 import logging
+import time
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -22,7 +23,7 @@ from config import TELEGRAM_TOKEN, ADMIN_USER_ID, SYSTEM_PROMPT
 from inference.client import llm
 from bot.conversation_manager import build_context
 from bot.feedback_collector import classify_user_message, feedback_to_score
-from bot.safety import safe_generate
+from bot.safety import safe_generate, is_safe
 from db.queries import (
     create_conversation,
     save_message,
@@ -79,17 +80,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+_STREAM_EDIT_INTERVAL = 0.6  # seconds between Telegram message edits (avoid rate-limit)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     user_text = update.message.text
     conv_id = await _get_or_create_conv(context.user_data, user_id)
 
-    # Detect implicit feedback about the previous response
     feedback_type = classify_user_message(user_text)
     if feedback_type and (prev_msg_id := context.user_data.get("last_assistant_msg_id")):
         fb = feedback_to_score(feedback_type)
-        # Re-score the previous message with user feedback included
-        # (the reward worker will pick this up and update the composite)
         context.user_data["pending_feedback"] = {"msg_id": prev_msg_id, "feedback": fb}
 
     await save_message(conv_id, role="user", content=user_text)
@@ -97,25 +98,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = await get_conversation_history(conv_id)
     messages = build_context(history)
 
-    await update.message.chat.send_action("typing")
+    # Send placeholder that we'll edit as tokens stream in
+    sent = await update.message.reply_text("▌")
 
-    # ── Generate (with safety filter + retry) ────────────────────────────────
+    # ── Stream generation → live-edit the placeholder ─────────────────────────
+    accumulated = ""
+    last_edit_at = 0.0
+
     try:
-        async def _generate(msgs):
-            out = ""
-            async for chunk in llm.chat_stream(msgs):
-                out += chunk
-            return out
-
-        full_response = await safe_generate(_generate, messages, SYSTEM_PROMPT)
+        async for chunk in llm.chat_stream(messages):
+            accumulated += chunk
+            now = time.monotonic()
+            if now - last_edit_at >= _STREAM_EDIT_INTERVAL:
+                try:
+                    await sent.edit_text(accumulated[-4096:] + "▌")
+                    last_edit_at = now
+                except Exception:
+                    pass  # "message not modified" or transient error — ignore
     except Exception as e:
         logger.error(f"Generation failed: {e}")
-        await update.message.reply_text(
+        await sent.edit_text(
             "The inference server seems offline. Use /seturl to update the Kaggle URL."
         )
         return
 
-    # ── Save & send ───────────────────────────────────────────────────────────
+    full_response = accumulated
+
+    # ── Safety check post-stream; retry non-streaming if needed ───────────────
+    safe, violations = is_safe(full_response)
+    if not safe:
+        logger.warning(f"Unsafe streaming response, retrying: {violations}")
+        async def _gen(msgs):
+            out = ""
+            async for chunk in llm.chat_stream(msgs):
+                out += chunk
+            return out
+        full_response = await safe_generate(_gen, messages, SYSTEM_PROMPT)
+
+    # ── Final edit with complete response (handle 4096-char limit) ────────────
+    await sent.edit_text(full_response[:4096])
+    for i in range(4096, len(full_response), 4096):
+        await update.message.reply_text(full_response[i : i + 4096])
+
+    # ── Save & score ──────────────────────────────────────────────────────────
     msg_record = await save_message(
         conv_id,
         role="assistant",
@@ -124,10 +149,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["last_assistant_msg_id"] = msg_record.id
 
-    for i in range(0, len(full_response), 4096):  # Telegram's 4096-char limit
-        await update.message.reply_text(full_response[i : i + 4096])
-
-    # Inline rule-based scoring (fast), LLM judge runs via reward worker
     context.application.create_task(
         _score_async(msg_record.id, messages, full_response)
     )
