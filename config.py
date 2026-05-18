@@ -26,7 +26,9 @@ INFERENCE_URL: str = os.getenv("INFERENCE_URL", "http://localhost:8000")
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
-# Unsloth's pre-quantized HF model — loads on any GPU, 4-bit saves VRAM
+# Active model — use MODEL_NAME (friendly name) for new code; BASE_MODEL kept for
+# backward-compat with notebooks that reference it directly.
+MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen3-8b-4bit")
 BASE_MODEL: str = os.getenv("BASE_MODEL", "unsloth/Qwen3-8B-bnb-4bit")
 
 # HuggingFace repo where LoRA adapters are pushed after each training run
@@ -74,7 +76,7 @@ class TrainingConfig:
 
     # LoRA
     lora_r: int = 32                   # Rank — sweet spot for 8B models
-    lora_alpha: int = 64               # alpha = 2 * r is standard scaling
+    lora_alpha: int = 32               # alpha = r (not 2*r) — matches inference adapter_config.json
     lora_dropout: float = 0.0          # No dropout for RL (unlike SFT)
     lora_target_modules: list = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",
@@ -142,15 +144,19 @@ ACTIVE_PLUGIN_NAMES: list[str] = [
     "rule_based",           # rewards/plugins/general.py — instant, free
     # "medical_guardrails", # disabled for now — re-enable when bot is live
     "llm_judge",            # rewards/plugins/general.py — async, ~$0.002/call
+    # "skywork_v2",         # rewards/models/skywork_v2.py — #1 RM-Bench; needs SKYWORK_REWARD_URL
+    # "rewardanything",     # rewards/models/rewardanything.py — #3 RM-Bench; needs REWARDANYTHING_URL
 ]
+
+# Reward ensemble strategy: "wco" (worst-case optimization) or "weighted_avg"
+# WCO forces the model to satisfy ALL reward criteria — prevents hacking one signal.
+REWARD_ENSEMBLE_MODE: str = os.getenv("REWARD_ENSEMBLE_MODE", "wco")
 
 # Loaded lazily on first use by the reward worker
 def get_active_plugins():
-    """Import and return the configured reward plugin instances."""
-    import rewards.plugins.general   # noqa: F401 — registers rule_based + llm_judge
-    import rewards.plugins.medical   # noqa: F401 — registers medical_guardrails
-    from rewards.registry import get_plugin
-    return [get_plugin(name) for name in ACTIVE_PLUGIN_NAMES]
+    """Auto-discover all plugins in rewards/plugins/ and return the active ones."""
+    from rewards.loader import get_active_plugins as _load
+    return _load(ACTIVE_PLUGIN_NAMES)
 
 
 # ── wandb ─────────────────────────────────────────────────────────────────────

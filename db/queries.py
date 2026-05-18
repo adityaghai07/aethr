@@ -124,6 +124,35 @@ async def get_message_context(message_id: uuid.UUID) -> dict:
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
+async def get_training_prompts(limit: int = 50) -> list[list[dict]]:
+    """
+    Pull recent conversation histories suitable for GRPO rollouts.
+    Returns a list of conversation histories — each is [{role, content}].
+    Picks conversations with at least one scored assistant turn (quality signal exists).
+    """
+    async with get_db() as session:
+        result = await session.execute(
+            select(Message.conversation_id)
+            .join(RewardScore, Message.id == RewardScore.message_id)
+            .where(Message.role == "assistant")
+            .group_by(Message.conversation_id)
+            .order_by(func.max(Message.created_at).desc())
+            .limit(limit)
+        )
+        conv_ids = [row[0] for row in result.all()]
+
+    histories = []
+    for conv_id in conv_ids:
+        history = await get_conversation_history(conv_id, limit=20)
+        if len(history) >= 2:   # need at least one user+assistant exchange
+            # Return history up to but not including the last assistant turn
+            # (so rollout generates fresh completions for the last user prompt)
+            user_turns = [i for i, m in enumerate(history) if m["role"] == "user"]
+            if user_turns:
+                histories.append(history[:user_turns[-1] + 1])
+    return histories
+
+
 async def get_recent_scored_examples(limit: int = 64) -> list[TrainingExample]:
     async with get_db() as session:
         result = await session.execute(

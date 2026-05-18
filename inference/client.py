@@ -1,19 +1,26 @@
 """
-Async HTTP client for the Kaggle inference server (OpenAI-compatible API).
+Async HTTP client for the Kaggle/vLLM inference server (OpenAI-compatible API).
 The inference server URL changes every Kaggle session — update via /seturl in the bot.
+
+Model name is resolved from the registry so config stays in one place.
 """
 import json
 import logging
+import os
 from typing import AsyncIterator
 import httpx
-from config import INFERENCE_URL, BASE_MODEL
+from config import INFERENCE_URL
+from inference.model_registry import get_model_config, DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
+
+# Resolve the active model at startup; override with MODEL_NAME env var
+_model_cfg = get_model_config(os.getenv("MODEL_NAME", DEFAULT_MODEL))
 
 
 class InferenceClient:
     def __init__(self, base_url: str = INFERENCE_URL):
-        self.base_url = base_url
+        self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=120.0)
 
     def set_url(self, url: str) -> None:
@@ -40,7 +47,7 @@ class InferenceClient:
         response = await self._client.post(
             f"{self.base_url}/v1/chat/completions",
             json={
-                "model": BASE_MODEL,
+                "model": _model_cfg.name,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
@@ -62,7 +69,7 @@ class InferenceClient:
             "POST",
             f"{self.base_url}/v1/chat/completions",
             json={
-                "model": BASE_MODEL,
+                "model": _model_cfg.name,
                 "messages": messages,
                 "stream": True,
                 "temperature": temperature,

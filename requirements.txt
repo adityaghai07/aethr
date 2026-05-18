@@ -15,11 +15,14 @@ datasets>=3.5.0
 # vLLM is installed on the Kaggle notebook, not local
 # vllm>=0.8.0
 
-# ── Telegram Bot ──────────────────────────────────────────────────────────────
+# ── Bot Integrations ──────────────────────────────────────────────────────────
 python-telegram-bot[job-queue]>=21.0
+slack-bolt>=1.21.0              # Slack integration (optional)
+uvicorn>=0.34.0                 # For reward model server
 
 # ── Database ──────────────────────────────────────────────────────────────────
-asyncpg>=0.30.0
+asyncpg>=0.30.0                 # PostgreSQL async driver (Supabase)
+aiosqlite>=0.21.0               # SQLite async driver (hobbyist / local dev)
 sqlalchemy[asyncio]>=2.0.0
 alembic>=1.15.0
 
